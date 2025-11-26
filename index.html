@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>F2G Serialized Candidate Image Decoder</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+    input, button {
+      margin: 10px 0;
+      padding: 6px 12px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    h2 {
+      margin-bottom: 4px;
+    }
+    .hint {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+
+    .candidate-row {
+      margin-bottom: 24px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #ddd;
+    }
+    .candidate-row p {
+      margin: 0 0 8px 0;
+      font-weight: bold;
+      color: #333;
+      font-size: 13px;
+    }
+    .full-image {
+      display: block; /* show at natural resolution */
+      margin-top: 4px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+    }
+
+    #candidateContainer {
+      margin-top: 16px;
+    }
+
+    #downloadZipBtn {
+      margin-top: 15px;
+    }
+
+    /* Progress bar styling */
+    #progressContainer {
+      display: none;
+      margin-top: 10px;
+      margin-bottom: 10px;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      background: #f7f7f7;
+      max-width: 420px;
+    }
+    #progressLabel {
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+    #progressBar {
+      width: 100%;
+      height: 14px;
+    }
+    #progressText {
+      font-size: 12px;
+      margin-left: 4px;
+    }
+  </style>
+
+  <!-- Libraries for ZIP download -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+</head>
+<body>
+  <h2>F2G Serialized Candidate Image Decoder</h2>
+  <div class="hint">
+    Upload a log file. The tool will look only for lines containing<br>
+    <code>Serialized F2G plugin result: {"candidate": ...}</code><br>
+    From that line it extracts the JSON string, finds Base64 strings in double quotes,<br>
+    unicode-decodes &amp; base64-decodes JPEGs, and shows them as<br>
+    <b>workflowId_endpointId.jpg</b> (when both values are present).<br>
+    <b>Only images that are successfully displayed are added to the ZIP.</b>
+  </div>
+
+  <input type="file" id="fileInput" accept=".txt,.json,.log" />
+  <button onclick="processFile()">Decode &amp; Show Images</button>
+
+  <!-- Progress bar -->
+  <div id="progressContainer">
+    <div id="progressLabel">Processing file...</div>
+    <progress id="progressBar" value="0" max="100"></progress>
+    <span id="progressText">0%</span>
+  </div>
+
+  <h3>Candidate images:</h3>
+  <div id="candidateContainer"></div>
+
+  <button id="downloadZipBtn" onclick="downloadZip()">Download All Images as ZIP</button>
+
+  <script>
+    // ONLY images that actually load in the UI are stored here
+    let extractedImages = [];
+
+    // Decode \uXXXX sequences that are still escaped in the text
+    function decodeUnicode(str) {
+      return str.replace(/\\u([0-9a-fA-F]{4})/g, function(match, grp) {
+        return String.fromCharCode(parseInt(grp, 16));
+      });
+    }
+
+    function processFile() {
+      const fileInput = document.getElementById("fileInput");
+      const file = fileInput.files[0];
+      const candidateContainer = document.getElementById("candidateContainer");
+      const progressContainer = document.getElementById("progressContainer");
+      const progressBar = document.getElementById("progressBar");
+      const progressText = document.getElementById("progressText");
+
+      candidateContainer.innerHTML = "";
+      extractedImages = [];
+
+      // Reset progress
+      if (progressBar && progressText && progressContainer) {
+        progressBar.value = 0;
+        progressText.textContent = "0%";
+      }
+
+      if (!file) {
+        alert("Please select a file first.");
+        if (progressContainer) {
+          progressContainer.style.display = "none";
+        }
+        return;
+      }
+
+      if (progressContainer) {
+        progressContainer.style.display = "block";
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const lines = e.target.result.split(/\r?\n/);
+        const totalLines = lines.length || 1;
+        const marker = 'Serialized F2G plugin result:';
+
+        for (let i = 0; i < lines.length; i++) {
+          const rawLine = lines[i];
+          if (!rawLine) {
+            // progress update
+            if (progressBar && progressText && (i % 500 === 0 || i === lines.length - 1)) {
+              const pct = Math.round(((i + 1) / totalLines) * 100);
+              progressBar.value = pct;
+              progressText.textContent = pct + "%";
+            }
+            continue;
+          }
+
+          const markerIndex = rawLine.indexOf(marker);
+          if (markerIndex === -1) {
+            // progress update
+            if (progressBar && progressText && (i % 500 === 0 || i === lines.length - 1)) {
+              const pct = Math.round(((i + 1) / totalLines) * 100);
+              progressBar.value = pct;
+              progressText.textContent = pct + "%";
+            }
+            continue;
+          }
+
+          // Extract JSON string part after the marker
+          let jsonStrRaw = rawLine.substring(markerIndex + marker.length).trim();
+          if (!jsonStrRaw) {
+            continue;
+          }
+
+          // Unicode-decode JSON string text
+          const jsonStrDecoded = decodeUnicode(jsonStrRaw);
+
+          // Extract workflowId / endpointId from this JSON string
+          let workflowId = "";
+          let endpointId = "";
+
+          const wfMatch = jsonStrDecoded.match(/"workflowId"\s*:\s*"([^"]+)"/);
+          if (wfMatch) workflowId = wfMatch[1];
+
+          const epMatch = jsonStrDecoded.match(/"endpointId"\s*:\s*"([^"]+)"/);
+          if (epMatch) endpointId = epMatch[1];
+
+          // Base name for images from this JSON record
+          let baseName;
+          if (workflowId && endpointId) {
+            baseName = workflowId + "_" + endpointId;
+          } else {
+            baseName = "candidate_" + (extractedImages.length + 1);
+          }
+
+          // Find ALL quoted strings inside JSON string and treat long ones as potential base64
+          const base64Regex = /"([^"]{100,})"/g;
+          let m;
+          let perLineIndex = 0;
+
+          while ((m = base64Regex.exec(jsonStrDecoded)) !== null) {
+            let candidateBase64 = m[1];
+
+            // strip whitespace and unicode decode again (if any remained)
+            candidateBase64 = decodeUnicode(candidateBase64).replace(/\s+/g, "");
+
+            // basic base64 sanity check
+            if (!/^[A-Za-z0-9+/=]+$/.test(candidateBase64) || candidateBase64.length < 100) {
+              continue;
+            }
+
+            // Final image name (per image)
+            let imageName = baseName;
+            if (perLineIndex > 0) {
+              imageName = baseName + "_" + (perLineIndex + 1);
+            }
+            imageName += ".jpg";
+
+            // Build UI row
+            const row = document.createElement("div");
+            row.className = "candidate-row";
+
+            const nameElem = document.createElement("p");
+            nameElem.textContent = imageName;
+            row.appendChild(nameElem);
+
+            // Create image and only add to ZIP list when it successfully loads
+            const img = new Image();
+            img.className = "full-image";
+
+            img.onload = function() {
+              // Only push to ZIP list if the image rendered successfully
+              extractedImages.push({ name: imageName, dataUrl: img.src });
+            };
+
+            img.onerror = function() {
+              // If it fails to load, we remove the row so user doesn't see a broken image
+              if (row.parentNode) {
+                row.parentNode.removeChild(row);
+              }
+            };
+
+            img.src = "data:image/jpeg;base64," + candidateBase64;
+            row.appendChild(img);
+
+            candidateContainer.appendChild(row);
+
+            perLineIndex++;
+          }
+
+          // Progress update after processing this line
+          if (progressBar && progressText && (i % 500 === 0 || i === lines.length - 1)) {
+            const pct = Math.round(((i + 1) / totalLines) * 100);
+            progressBar.value = pct;
+            progressText.textContent = pct + "%";
+          }
+        }
+
+        // Done
+        if (progressBar && progressText) {
+          progressBar.value = 100;
+          progressText.textContent = "100%";
+        }
+        if (progressContainer) {
+          // small delay so user can see 100%
+          setTimeout(function() {
+            progressContainer.style.display = "none";
+          }, 300);
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    function downloadZip() {
+      if (!extractedImages.length) {
+        alert("No images to download. Please decode a file first.");
+        return;
+      }
+      if (typeof JSZip === "undefined" || typeof saveAs === "undefined") {
+        alert("ZIP libraries not loaded.");
+        return;
+      }
+
+      const zip = new JSZip();
+      extractedImages.forEach(function(img) {
+        const base64Data = img.dataUrl.split(",")[1];
+        zip.file(img.name, base64Data, { base64: true });
+      });
+
+      zip.generateAsync({ type: "blob" }).then(function(content) {
+        const now = new Date();
+        const ts = now.toISOString().replace(/[:.]/g, "-");
+        saveAs(content, "candidate_images_" + ts + ".zip");
+      });
+    }
+  </script>
+</body>
+</html>
